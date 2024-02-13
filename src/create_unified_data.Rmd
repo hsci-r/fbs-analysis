@@ -1,0 +1,899 @@
+---
+title: "Create unified data"
+output:
+  html_notebook:
+    code_folding: hide
+    toc: yes  
+---
+
+This notebook creates the unified data model used for analyses in the FBS project
+
+```{r setup}
+source(here::here("src/common_basis.R"))
+delete_temporary_tables(con, "fbs_raw", "fbs_analysis")
+register_tables(con, "vd17")
+register_tables(con, "fbs_raw")
+register_tables(con, "vd17_analysis")
+```
+
+# Bring in raw data from external sources
+
+```{r}
+library(jsonlite)
+fbs_raw_metadata_json <- read_json(here("data/input/fr_mitglieder.json"), simplifyVector = T) %>%
+  tibble() %>%
+  mutate(gnd = if_else(gnd == "", NA_character_, gnd)) %>%
+  rename(
+    GND = gnd, 
+    member_number = nr, 
+    member_number_numeric = Mitgliedsnr,
+    family_name = name,
+    first_name = vorname,
+    title = titel,
+    date_of_birth = geb_datum,
+    place_of_birth = geb_ort,
+    date_of_death = tod_datum,
+    place_of_death = tod_ort,
+    denomination = bekenntnis,
+    society_name = fg_name,
+    member_motto = wort_mb,
+    member_plant_mb = pflanze_mb,
+    member_plant = pflanze_kc,
+    member_plant_lat = pflanze_lat,
+    date_of_admission = aufnahmedatum,
+    place_of_admission = aufnahmeort,
+    circumstances_of_admission = umstand,
+    place_region_of_residence = ort_region,
+    impact = wirkung,
+    rank_and_position = stand_stellung,
+    education = bildungsweg,
+    career = werdegang,
+    source = quelle,
+    coat_of_arms_image_link = abbildung,
+    coat_of_arms_image_source_citation = nachweis,
+    coat_of_arms_image_source_link = bildlink,
+    portrait_image_source_citation = portraitnachweis,
+    portrait_image_link = portraitlink
+  ) %>%
+  mutate(GND = str_c("gnd/", GND)) %>% 
+  mutate(across(everything(),~if_else(.x=="",NA_character_,.x))) %>%
+  mutate(member_number_numeric=as.numeric(member_number_numeric))
+  
+fbs_raw_metadata_gs <- read_sheet(ss = "1tYSIXhoeeHk92HsP93Wul4b1mDjlsKcavc9LOi4K6RU", sheet = "FBS_master_metadata", col_types = "c") %>%
+  mutate(GND = str_c("gnd/", GND), alternate_GND = str_c("gnd/", alternate_GND), `Old GND` = str_c("gnd/", `Old GND`)) 
+
+fbs_raw_metadata_l <- fbs_raw_metadata_json %>%
+  left_join(fbs_raw_metadata_gs %>% rename_with(~str_c("old_", .x)) %>% rename(member_number=old_member_number), join_by(member_number))
+```
+
+# Create unified actor tables
+
+```{r}
+a_id_to_fbs_member_number <- fbs_raw_metadata_l %>%  
+  arrange(member_number) %>%
+  mutate(a_id=row_number()) %>%
+  select(a_id, member_number) %>%
+  copy_to_a(con, name="a_id_to_fbs_member_number",temporary=FALSE,overwrite=TRUE, unique_indexes=list(c("a_id"),c("member_number")))
+```
+
+```{r}
+gnd_to_member_number_map_a <- fbs_raw_metadata_l %>% 
+  select(member_number, GND) %>%
+  filter(!is.na(GND)) %>%
+  union_all(
+    fbs_raw_metadata_l %>% 
+      select(member_number, GND=old_GND) %>%
+    filter(!is.na(GND))
+  ) %>%
+  union_all(
+    fbs_raw_metadata_l %>% 
+      select(member_number, GND=old_GND) %>%
+    filter(!is.na(GND))
+  ) %>%
+  union_all(
+    fbs_raw_metadata_l %>% 
+      select(member_number, GND=old_alternate_GND) %>%
+    filter(!is.na(GND))
+  ) %>%
+  union_all(
+    fbs_raw_metadata_l %>% 
+      select(member_number, GND=`old_Old GND`) %>%
+    filter(!is.na(GND))
+  ) %>%
+  distinct(member_number,GND) %>%
+  copy_to_a(con)
+
+max_a_id <- a_id_to_fbs_member_number %>% 
+  count() %>% 
+  pull()
+
+a_id_to_gnd <- a_id_to_fbs_member_number %>% 
+  inner_join(gnd_to_member_number_map_a) %>%
+  select(a_id,GND) %>%
+  compute_a(unique_indexes=list(c("GND")))
+
+a_id_to_gnd <- a_id_to_gnd %>%
+  union_all(
+    vd17_auth_id_a %>% 
+      select(GND) %>%
+    union_all(
+      vd17_person_links_a %>%
+      select(GND)
+    ) %>%
+    union_all(
+      vd17_corporate_links_a %>%
+        select(GND)
+    ) %>%
+      filter(!is.na(GND)) %>%
+      distinct() %>%
+      anti_join(a_id_to_gnd) %>%
+      arrange(GND) %>%
+      mutate(a_id=row_number() + max_a_id) %>%
+      select(a_id, GND)
+  ) %>%
+  collect() %>%
+  copy_to_a(con, name="a_id_to_gnd", temporary=FALSE, overwrite=TRUE, unique_indexes=list(c("a_id","GND"),c("GND")))
+```
+
+```{r}
+high_german_replacements_l <- c(
+  "dzsch" = "sch",
+  "dsch" = "z",
+  "schm" = "sm",
+  "aeu" = "eu",
+  "ae" = "a",
+  "au" = "eu",
+  "ai" = "ei",
+  "ay" = "ei",
+  "bf" = "f",
+  "chs" = "c",
+  "ch" = "c",
+  "ck" = "c",
+  "cs" = "c",
+  "cz" = "c",
+  "ds" = "z",
+  "dz" = "z",
+  "gh" = "c",
+  "gs" = "x",
+  "g" = "c",
+  "j" = "i",
+  "ks" = "x",
+  "k" = "c",
+  "oe" = "u",
+  "oi" = "eu",
+  "pf" = "f",
+  "ph" = "f",
+  "scl" = "sl",
+  "p" = "b",
+  "ts" = "sch",
+  "tz" = "z",
+  "t" = "d",
+  "ue" = "u",
+  "v" = "f",
+  "w" = "f",
+  "ß" = "ss",
+  "ff" = "f",
+  "y" = "i"
+)
+
+prefixes_l <- vd17_person_links_a %>%
+  filter(!is.na(prefix)) %>%
+  count(prefix = str_to_lower(prefix)) %>%
+  filter(n > 1) %>%
+  collect() %>%
+  mutate(prefix = str_c("\\b", str_escape(prefix), "\\b")) %>%
+  arrange(desc(str_length(prefix))) %>%
+  pull(prefix)
+
+vd17_auth_match_values_a <- vd17_auth_a %>%
+  filter(field_code %in% c("100", "400")) %>%
+  pivot_wider(id_cols = a_record_number:field_number, values_from = value, names_from = subfield_code) %>%
+  filter(str_length(str_replace_all(str_to_lower(a), "[^a-zß]", "")) >= 3) %>%
+  mutate(match_key = str_to_lower(str_c(a, b, c))) %>%
+  select(a_record_number, match_key) %>%
+  collect() %>%
+  mutate(match_key = str_replace_all(match_key, str_flatten(prefixes_l, collapse = "|"), "")) %>%
+  mutate(match_key = str_replace_all(match_key, high_german_replacements_l)) %>%
+  mutate(match_key = str_replace_all(match_key, "[^a-zß]", "")) %>%
+  filter(!is.na(match_key), match_key != "") %>%
+  distinct() %>%
+  copy_to_a(con, indexes=list(c("a_record_number"))) %>%
+  inner_join(vd17_auth_id_a) %>%
+  inner_join(a_id_to_gnd) %>%
+  distinct(a_id, match_key) %>%
+  compute_a(unique_indexes = list(c("a_id", "match_key")), indexes = list(c("match_key")))
+
+fbs_match_values_a <- fbs_raw_metadata_l %>%
+  mutate(epithet = if_else(!is.na(title), str_c(family_name, ", ", title), NA_character_), family_name = if_else(!is.na(title), NA_character_, family_name)) %>%
+  select(member_number, GND, first_name, family_name, epithet) %>%
+  pivot_longer(first_name:epithet) %>%
+  mutate(value = str_to_lower(value)) %>%
+  filter(!is.na(value)) %>%
+  pivot_wider() %>%
+  mutate(match_key = case_when(
+    !is.na(epithet) & !is.na(first_name) ~ str_c(first_name, epithet),
+    !is.na(first_name) & !is.na(family_name) ~ str_c(family_name, first_name),
+    T ~ NA_character_
+  )) %>%
+  mutate(match_key = str_replace_all(match_key, str_flatten(prefixes_l, collapse = "|"), "")) %>%
+  mutate(match_key = str_replace_all(match_key, high_german_replacements_l)) %>%
+  mutate(match_key = str_replace_all(match_key, "[^a-zß]", "")) %>%
+  filter(!is.na(match_key), match_key != "") %>%
+  copy_to_a(con, unique_indexes = list(c("member_number"))) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  distinct(a_id, match_key) %>%
+  compute_a(unique_indexes = list(c("a_id", "match_key")), indexes = list(c("match_key")))
+
+ambiguous_match_keys_a <- vd17_auth_match_values_a %>%
+  union(fbs_match_values_a) %>%
+  count(match_key) %>%
+  filter(n>1) %>%
+  select(match_key) %>%
+  compute_a(unique_indexes=list(c("match_key")))
+
+a_id_to_match_values <- vd17_auth_match_values_a %>%
+  union(fbs_match_values_a) %>%
+  anti_join(ambiguous_match_keys_a) %>%
+  compute_a(unique_indexes = list(c("a_id","match_key"), c("match_key")))
+  
+vd17_match_values_a <- vd17_person_links_a %>%
+  mutate(personal_name = if_else(!is.na(count), str_c(personal_name, ", ", count), personal_name)) %>%
+  select(record_number, field_number, field_code, GND, family_name, first_names, personal_name, epithet) %>%
+  pivot_longer(family_name:epithet) %>%
+  mutate(value = str_to_lower(value)) %>%
+  filter(!is.na(value)) %>%
+  collect() %>%
+  pivot_wider() %>%
+  mutate(match_key = case_when(
+    !is.na(epithet) & !is.na(personal_name) ~ str_c(personal_name, epithet),
+    !is.na(first_names) & !is.na(family_name) ~ str_c(family_name, first_names),
+    T ~ NA_character_
+  )) %>%
+  mutate(match_key = str_replace_all(match_key, str_flatten(prefixes_l, collapse = "|"), "")) %>%
+  mutate(match_key = str_replace_all(match_key, high_german_replacements_l)) %>%
+  mutate(match_key = str_replace_all(match_key, "[^a-zß]", "")) %>%
+  filter(!is.na(match_key), match_key != "") %>%
+  copy_to_a(con, unique_indexes = list(c("record_number", "field_number", "field_code")), indexes = list(c("match_key")))
+
+max_a_id <- a_id_to_gnd %>% 
+  summarise(max(a_id)) %>% 
+  pull()
+
+a_id_to_match_values <- a_id_to_match_values %>%
+  union_all(vd17_match_values_a %>% 
+              distinct(match_key) %>%
+              anti_join(
+                vd17_match_values_a %>% 
+                select(match_key) %>%
+                inner_join(a_id_to_match_values %>% 
+                             select(match_key) %>%
+                             union_all(ambiguous_match_keys_a) %>%
+                             distinct(match_key) %>%
+                             compute_a(unique_indexes = list(c("match_key")))
+                ) %>%
+                distinct() %>%
+                compute_a(unique_indexes = list(c("match_key")))
+              ) %>%
+              compute_a(unique_indexes=list(c("match_key"))) %>%
+              dbplyr::window_order(match_key) %>%
+              mutate(a_id=row_number() + max_a_id) %>%
+              compute_a()
+  ) %>%
+  compute_a(name="a_id_to_match_values", temporary=FALSE, overwrite=TRUE, unique_indexes = list(c("a_id","match_key"), c("match_key")))
+
+```
+
+
+
+```{r}
+
+
+
+
+actors_a <- fbs_raw_metadata_l %>% 
+  mutate(a_id=str_c("fbs_member_",member_number)) %>%
+  select(a_id) %>%
+  left_join(vd17_auth_id_a %>% 
+              inner_join(gnd_to_member_number_map_a, join_by(GND)) %>% 
+              inner_join(vd17_auth_gender_a), join_by(actor_id)) 
+
+#actors <- actor_id, unified_name, gender, earliest_year_of_birth, latest_year_of_birth, earliest_year_of_death, latest_year_of_death
+```
+
+```{r}
+member_dobs <- fbs_raw_metadata_l %>%
+  mutate(dobs=date_of_birth %>% str_extract_all("\\d{4}")) %>% 
+  select(member_number, dobs) %>% 
+  unnest(dobs) %>% 
+  mutate(dobs=as.numeric(dobs)) %>%
+  group_by(member_number) %>% 
+  summarise(earliest_year_of_birth=min(dobs),latest_year_of_birth=max(dobs),.groups="drop")
+
+member_dods <- fbs_raw_metadata_l %>%
+  mutate(dods=date_of_death %>% str_extract_all("\\d{4}")) %>% 
+  select(member_number, dods) %>% 
+  unnest(dods) %>% 
+  mutate(dods=as.numeric(dods)) %>%
+  group_by(member_number) %>% 
+  summarise(earliest_year_of_death=min(dods),latest_year_of_death=max(dods),.groups="drop")
+
+member_doas <- fbs_raw_metadata_l %>%
+  mutate(doas=date_of_admission %>% str_extract_all("\\d{4}")) %>% 
+  select(member_number, doas) %>% 
+  unnest(doas) %>% 
+  mutate(doas=as.numeric(doas)) %>%
+  group_by(member_number) %>% 
+  summarise(earliest_year_of_admission=min(doas),latest_year_of_admission=max(doas),.groups="drop")
+
+```
+
+```{r}
+fbs_metadata <- fbs_raw_metadata_json %>%
+  select(-member_number_numeric) %>%
+  left_join(member_dobs) %>% 
+  left_join(member_dods) %>%
+  left_join(member_doas) %>%
+  copy_to_a(con, name="fbs_metadata", temporary=FALSE, overwrite=TRUE, unique_indexes=list(c("member_number")))
+```
+
+
+
+# Create unified publication tables
+
+## Key generation
+
+```{r}
+high_german_replacements_l <- c(
+  "dzsch" = "sch",
+  "dsch" = "z",
+  "schm" = "sm",
+  "aeu" = "eu",
+  "ae" = "a",
+  "au" = "eu",
+  "ai" = "ei",
+  "ay" = "ei",
+  "bf" = "f",
+  "chs" = "c",
+  "ch" = "c",
+  "ck" = "c",
+  "cs" = "c",
+  "cz" = "c",
+  "ds" = "z",
+  "dz" = "z",
+  "gh" = "c",
+  "gs" = "x",
+  "g" = "c",
+  "j" = "i",
+  "ks" = "x",
+  "k" = "c",
+  "oe" = "u",
+  "oi" = "eu",
+  "pf" = "f",
+  "ph" = "f",
+  "scl" = "sl",
+  "p" = "b",
+  "ts" = "sch",
+  "tz" = "z",
+  "t" = "d",
+  "ue" = "u",
+  "v" = "f",
+  "w" = "f",
+  "ß" = "ss",
+  "ff" = "f",
+  "y" = "i"
+)
+
+form_factors <- vd17_a %>%
+  filter(field_code == "034I") %>%
+  distinct(record_number, form_factor = value) %>%
+  group_by(record_number) %>%
+  dbplyr::window_order(form_factor) %>%
+  summarize(form_factors = str_flatten(form_factor, collapse = "|"), .groups = "drop") %>%
+  #  compute_c()
+  collect() %>%
+  copy_to_c(con)
+
+places_of_publication <- vd17_normalized_locations_a %>%
+  filter(location_type == "pup") %>%
+  select(record_number, place_of_publication = location)
+places_of_production <- vd17_normalized_locations_a %>%
+  filter(location_type == "mfp") %>%
+  select(record_number, place_of_production = location)
+places_of_distribution <- vd17_normalized_locations_a %>%
+  filter(location_type == "dbp") %>%
+  select(record_number, place_of_distribution = location)
+
+unified_places_of_publication <- vd17_a %>%
+  distinct(record_number) %>%
+  left_join(places_of_publication, join_by(record_number)) %>%
+  left_join(places_of_production, join_by(record_number)) %>%
+  left_join(places_of_distribution, join_by(record_number)) %>%
+  mutate(place_of_publication = coalesce(place_of_publication, place_of_production, place_of_distribution)) %>%
+  filter(!is.na(place_of_publication)) %>%
+  mutate(place_of_publication = str_replace_all(str_to_lower(place_of_publication), "[^a-zß]", "")) %>%
+  distinct(record_number, place_of_publication) %>%
+  group_by(record_number) %>%
+  dbplyr::window_order(place_of_publication) %>%
+  summarize(places_of_publication = str_flatten(place_of_publication, collapse = "|"), .groups = "drop") %>%
+  #  compute_c()
+  collect() %>%
+  copy_to_c(con)
+
+rda_printers <- vd17_a %>%
+  filter(field_code == "029F", subfield_code == "4", value == "prt") %>%
+  select(record_number, field_number) %>%
+  inner_join(vd17_a %>% filter(subfield_code == "7"), join_by(record_number, field_number)) %>%
+  select(record_number, printer_gnd = value)
+
+printers <- vd17_a %>%
+  filter(field_code == "033J", subfield_code == "7") %>%
+  select(record_number, printer_gnd = value)
+
+additional_printers <- vd17_a %>%
+  filter(field_code == "028C", (subfield_code == "4" & value == "prt") | (subfield_code == "B" & str_detect(value, "^Drucker|^Verleger"))) %>%
+  distinct(record_number, field_number) %>%
+  inner_join(vd17_a %>% filter(subfield_code == "7"), join_by(record_number, field_number)) %>%
+  select(record_number, printer_gnd = value)
+
+all_printers <- rda_printers %>%
+  union_all(printers) %>%
+  union_all(additional_printers) %>%
+  distinct(record_number, printer_gnd) %>%
+  group_by(record_number) %>%
+  dbplyr::window_order(printer_gnd) %>%
+  summarize(printer_gnds = str_flatten(printer_gnd, collapse = "|"), .groups = "drop") %>%
+  #  compute_c()
+  collect() %>%
+  copy_to_c(con)
+
+vd17_titlekeys_c <- vd17_titles_a %>%
+  mutate(title = str_replace_all(str_to_lower(title), "[^a-zß]", "")) %>%
+  select(record_number, title) %>%
+  collect() %>%
+  mutate(title = str_replace_all(title, high_german_replacements_l)) %>%
+  copy_to_c(con)
+```
+
+## Variant table calculation
+
+```{r variants}
+vd17_explicitly_mapped_variants <- vd17_a %>%
+  filter(field_code == "037A", str_detect(value, "nicht ident|identisch|variant")) %>%
+  collect() %>%
+  mutate(vd17_id = str_extract_all(value, "\\b[0-9]+:[0-9]+.\\b")) %>%
+  unnest(vd17_id) %>%
+  distinct(record_number, vd17_id) %>%
+  copy_to_a(con) %>%
+  inner_join(vd17_id_a, join_by(vd17_id)) %>%
+  select(record_number.x, record_number.y) %>%
+  compute_a()
+
+vd17_explicitly_mapped_variants <- vd17_explicitly_mapped_variants %>%
+  union_all(vd17_explicitly_mapped_variants %>% rename(record_number.x = record_number.y, record_number.y = record_number.x)) %>%
+  filter(record_number.x < record_number.y) %>%
+  distinct(record_number.x, record_number.y) %>%
+  compute_a()
+
+t <- vd17_titlekeys_c %>%
+  select(record_number, title) %>%
+  #  inner_join(vd17_normalized_years_c %>% select(record_number, normalized_year)) %>%
+  left_join(unified_places_of_publication) %>%
+  left_join(all_printers) %>%
+  inner_join(vd17_page_counts_c %>% mutate(page_count_low = page_count - pmin(floor(page_count / 3), 3), page_count_high = page_count + pmin(floor(page_count / 3), 3))) %>%
+  #  inner_join(extents) %>%
+  left_join(form_factors) %>%
+  replace_na(list(form_factors = "[UNKNOWN]", printer_gnds = "[UNKNOWN]", places_of_publication = "[UNKNOWN]")) %>%
+  compute_c()
+
+vd17_identical_metadata <- t %>%
+  inner_join(t, join_by(title, places_of_publication, printer_gnds, page_count >= page_count_low, page_count <= page_count_high, form_factors, record_number < record_number)) %>%
+  select(record_number.x, record_number.y, title, places_of_publication, printer_gnds, page_count.x, page_count.y, form_factors) %>%
+  left_join(vd17_fingerprints_c, join_by(record_number.x == record_number)) %>%
+  left_join(vd17_fingerprints_c, join_by(record_number.y == record_number)) %>%
+  collect() %>%
+  mutate(fpsame = (f1_1.x == f1_1.y & f1_2.x == f1_2.y) + (f2_1.x == f2_1.y & f2_2.x == f2_2.y) + (f3_1.x == f3_1.y & f3_2.x == f3_2.y) + (f4_1.x == f4_1.y & f4_2.x == f4_2.y)) %>%
+  filter(fpsame >= 2, year.x == year.y) %>%
+  copy_to_a(con)
+
+vd17_identical_fingerprints <- vd17_fingerprints_c %>%
+  inner_join(vd17_page_counts_c) %>%
+  inner_join(vd17_fingerprints_c %>% inner_join(vd17_page_counts_c %>% mutate(page_count_low = page_count - pmin(floor(page_count / 3), 3), page_count_high = page_count + pmin(floor(page_count / 3), 3))), join_by(f1_1, f1_2, f2_1, f2_2, f3_1, f3_2, f4_1, f4_2, f34_source, year, record_number < record_number, page_count >= page_count_low, page_count <= page_count_high)) %>%
+  select(record_number.x, record_number.y) %>%
+  compute_a()
+
+vd17_variants <- vd17_explicitly_mapped_variants %>%
+  union(vd17_identical_metadata %>% select(record_number.x, record_number.y)) %>%
+  union(vd17_identical_fingerprints) %>%
+  union_all( # different record, same VD17 id
+    vd17_id_a %>% 
+      inner_join(vd17_id_a, join_by(record_number<record_number,vd17_id==vd17_id))
+  ) %>%
+  inner_join( # require variants to be of the same type (multivolume compound/singular/part of)
+    vd17_record_types_a %>% select(record_number.x = record_number, record_type.x = record_type)
+  ) %>%
+  inner_join(
+    vd17_record_types_a %>% select(record_number.y = record_number, record_type.y = record_type)
+  ) %>%
+  filter(record_type.x == record_type.y) %>%
+  select(record_number.x, record_number.y) %>%
+  union_all(vd17_a %>% # map multipart compound records to all their parts
+    filter(field_code == "036D", subfield_code=="9") %>% 
+    select(record_number,value) %>%
+    inner_join(vd17_a %>% 
+               filter(field_code=="003@") %>% 
+               select(record_number,value), join_by(value)) %>%
+    select(-value)
+  ) %>%
+  compute_a(name = dbplyr::in_schema("fbs_raw","vd17_variants"), unique_indexes = list(c("record_number.x", "record_number.y"), c("record_number.y", "record_number.x")), temporary = TRUE, overwrite = TRUE)
+
+vd17_id_mapping_a <- tbl(con, sql("
+WITH RECURSIVE final_record_number AS (
+  SELECT `record_number.x`, `record_number.y`
+  FROM fbs_raw.vd17_variants
+  UNION
+  SELECT t.`record_number.x`, o.`record_number.y`
+  FROM final_record_number t, fbs_raw.vd17_variants o
+  WHERE t.`record_number.y`=o.`record_number.x`
+)
+SELECT `record_number.x` AS record_number, `record_number.y` AS source_record_number FROM final_record_number")) %>%
+  group_by(source_record_number) %>%
+  filter(record_number == min(record_number)) %>% # this removes multi-mappings
+  ungroup() %>%
+  compute_a(unique_indexes=list(c("source_record_number", "record_number")))
+
+vd17_id_mapping_a <- vd17_id_mapping_a %>%
+  union(vd17_a %>% # recover mapping of multipart compound records to all their parts
+    filter(field_code == "036D", subfield_code=="9") %>% 
+    select(record_number,value) %>%
+    inner_join(vd17_a %>% 
+                   filter(field_code=="003@") %>% 
+                   select(source_record_number=record_number,value), join_by(value)) %>%
+    select(-value) %>% 
+      left_join(vd17_id_mapping_a, join_by(record_number==source_record_number)) %>%
+      mutate(record_number=coalesce(record_number.y,record_number)) %>% 
+      select(record_number,source_record_number)
+    ) %>%
+  compute_a(name = dbplyr::in_schema("fbs_raw","vd17_id_mapping_a"), temporary = FALSE, overwrite = TRUE, unique_indexes = list(c("source_record_number", "record_number"),c("record_number","source_record_number")))
+
+vd17_id_mapping_c <- vd17_id_mapping_a %>%
+  compute_c(name = dbplyr::in_schema("fbs_raw","vd17_id_mapping_c"), temporary = FALSE, overwrite = TRUE)
+```
+
+```{r}
+p_id_to_record_number_a <- vd17_a %>% 
+  distinct(record_number) %>%
+  anti_join(vd17_id_mapping_a, join_by(record_number==source_record_number)) %>%
+  mutate(p_id=row_number()) %>%
+  compute_a()
+
+p_id_to_record_number_a <- p_id_to_record_number_a %>%
+  union_all(
+    p_id_to_record_number_a %>%
+      inner_join(vd17_id_mapping_a, join_by(record_number)) %>%
+      select(p_id, record_number=source_record_number)
+  ) %>%
+  relocate(p_id) %>%
+  compute_a(name="p_id_to_record_number_a", temporary=FALSE, overwrite=TRUE, unique_indexes = list(c("p_id","record_number")), indexes=list(c("record_number")))
+```
+
+```{r}
+p_id_to_vd17_id_a <- p_id_to_record_number_a %>% 
+  inner_join(vd17_id_a) %>%
+  distinct(p_id, vd17_id) %>%
+  compute_a(name="p_id_to_vd17_id_a", temporary=FALSE, overwrite=TRUE, unique_indexes = list(c("p_id","vd17_id")), indexes=list(c("vd17_id")))
+```
+
+
+## Publication years
+
+```{r}
+p_year <- p_id_to_record_number_a %>% # prioritise dates from non-unified records
+  inner_join(vd17_record_types_a %>% filter(record_type!="Unified multi-part publication") %>% select(record_number)) %>%
+  inner_join(vd17_normalized_years_a %>% filter(!is.na(normalized_year))) %>%
+  group_by(p_id) %>%
+  summarise(year=min(normalized_year),.groups="drop") %>%
+  left_join(p_id_to_record_number_a %>% # add info from unified records
+    inner_join(vd17_record_types_a %>% filter(record_type=="Unified multi-part publication") %>% select(record_number)) %>%
+    inner_join(vd17_normalized_years_a %>% filter(!is.na(normalized_year))) %>%
+    group_by(p_id) %>%
+    summarise(mp_year=min(normalized_year),.groups="drop")
+  ) %>%
+  mutate(year=coalesce(year,mp_year)) %>%
+  select(p_id,year) %>%
+  compute_a(name="p_year", temporary=FALSE, overwrite=TRUE, indexes=list(c("year")), unique_indexes=list(c("p_id")))
+```
+
+## Publication genres
+
+```{r}
+p_genre <- p_id_to_record_number_a %>%
+  inner_join(vd17_genres_a) %>%
+  distinct(p_id, full_genre) %>%
+  compute_a(name="p_genre", temporary=FALSE, overwrite=TRUE, indexes=list(c("p_id"),c("full_genre")))
+```
+
+## Publication languages
+
+```{r}
+p_languages <- p_id_to_record_number_a %>%
+  inner_join(vd17_normalized_langs_a) %>%
+  select(-record_number,-field_number) %>%
+  distinct() %>%
+  compute_a(name="p_languages", temporary=FALSE, overwrite=TRUE, indexes=list(c("p_id"),c("publication_language"),c("original_language"),c("intermediary_language")))
+```
+
+
+
+## Titles
+
+```{r}
+p_title <- p_id_to_record_number_a %>% # prioritise dates from non-unified records
+  inner_join(vd17_record_types_a %>% filter(record_type!="Unified multi-part publication") %>% select(record_number)) %>%
+  inner_join(vd17_combined_titles_a) %>%
+  distinct(p_id, combined_title) %>%
+  group_by(p_id) %>%
+  summarise(combined_title=str_flatten(combined_title, collapse="|"),.groups="drop") %>%
+  left_join(p_id_to_record_number_a %>% # add info from unified records
+    inner_join(vd17_record_types_a %>% filter(record_type=="Unified multi-part publication") %>% select(record_number)) %>%
+    inner_join(vd17_combined_titles_a) %>%
+    distinct(p_id, combined_title) %>%
+    group_by(p_id) %>%
+    summarise(mp_combined_title=str_flatten(combined_title, collapse="|"),.groups="drop")
+  ) %>%
+  mutate(combined_title=coalesce(combined_title,mp_combined_title)) %>%
+  select(p_id,combined_title) %>%
+  compute_a(name="p_title", temporary=FALSE, overwrite=TRUE, unique_indexes=list(c("p_id")))
+```
+
+
+## Actor links
+
+
+```{r}
+p_to_a <- vd17_person_links_a %>% # person links through GND
+  select(record_number, field_code, role, role2, GND) %>%
+  inner_join(a_id_to_gnd) %>%
+  select(record_number, field_code, role, role2, a_id) %>%
+  compute_a() %>%
+  union_all(vd17_corporate_links_a %>% # corporate links through GND
+    inner_join(a_id_to_gnd) %>%
+    select(record_number, field_code, role, role2, a_id) %>%
+    compute_a()
+  ) %>%
+  union_all(vd17_match_values_a %>% # person links through match keys
+              select(record_number, field_number, match_key) %>%
+              inner_join(a_id_to_match_values) %>%
+              inner_join(vd17_person_links_a %>% 
+                           select(record_number, field_number, field_code, role, role2)) %>%
+              select(-field_number) %>%
+              compute_a()
+  ) %>% 
+  compute_a(indexes=list(c("record_number"))) %>%
+  inner_join(p_id_to_record_number_a) %>%
+  distinct(p_id,a_id,field_code,role,role2) %>%
+  compute_a(name="p_to_a", temporary=FALSE, overwrite=TRUE, indexes=list(c("p_id"),c("a_id"),c("field_code"),c("role"),c("role2")))
+```
+
+```{r}
+fbs_purpose_related_p <- p_to_a %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>%
+  inner_join(p_genre %>% inner_join(vd17_genre_categorisation_a)) %>%
+  group_by(p_id) %>%
+  filter(!any(group_1 == "Society-unrelated")) %>%
+  filter(any(group_1 == "Society-related")) %>%
+  ungroup() %>%
+  distinct(p_id) %>%
+  inner_join(p_languages %>% filter(publication_language=="ger") %>% distinct(p_id)) %>%
+  anti_join(
+    fbs_manual_status_overrides_a %>%
+      filter(manual_status_override!="Member substantive role and society purpose related") %>%
+      inner_join(p_id_to_vd17_id_a)
+  ) %>%
+  union(
+    fbs_manual_status_overrides_a %>% 
+      filter(manual_status_override=="Member substantive role and society purpose related") %>%
+      inner_join(p_id_to_vd17_id_a) %>%
+      distinct(p_id)
+  ) %>%
+  compute_a(name="fbs_purpose_related_p", temporary=FALSE, overwrite=TRUE, unique_indexes=list(c("p_id")))
+```
+
+
+```{r}
+genre_categorisation <- vd17_genre_categorisation_a %>%
+  compute_a(
+    name="genre_categorisation", 
+    temporary=FALSE, 
+    overwrite=TRUE, 
+    unique_indexes=list(c("full_genre")),
+    indexes=list(c("group_1"), c("group_2"), c("group_3"), c("group_4"), c("group_5"), c("group_6"))
+  )
+```
+
+# New master gsheet creation
+
+```{r}
+flag_028C_na_roles <- 
+  fbs_purpose_related_p %>%
+    inner_join(p_to_a) %>%
+    filter(
+        field_code %in% c("028A", "028B", "028C"),
+        is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+        is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+            "^Adressat",
+            "Erwähnte",
+            "Gefeierte",
+            "Mitglied eines Ausschusses, der akademische Grade vergibt",
+            "Normerlassende Gebietskörperschaft",
+            "Praeses",
+            "Respondent",
+            "Sonstige Person, Familie und Körperschaft",
+            "Verfasser",
+            "Vertragspartner",
+            "Widmende",
+            "Widmungsempfänger",
+            "Drucker",
+            "Zensor",
+            "Beiträger",
+            "GeistigeR Schöpfer",
+            "Mitwirkender",
+            "Herausgeber",
+            "Angeklagte",
+            "Auftraggeber"
+        ), collapse = "|^"))) %>%
+    inner_join(a_id_to_fbs_member_number) %>%
+    inner_join(fbs_metadata %>% transmute(member_number,high_nobility=str_detect(rank_and_position,"graf|herzog|fürst"))) %>%
+    distinct(p_id, field_code,role2,high_nobility) %>%
+    group_by(p_id) %>%
+    summarise(only_028C_na_role=all(field_code=="028C") & all(is.na(role2)),only_high_nobility=all(high_nobility)) %>%
+    transmute(p_id, flag_028C_na_roles=case_when(
+      only_028C_na_role & only_high_nobility ~ "only 028C NA role + only high nobility",
+      only_028C_na_role ~ "only 028C NA role"
+    ))
+```
+
+
+```{r}
+substantive_contributions <- 
+  fbs_purpose_related_p %>%
+    inner_join(p_to_a) %>%
+    filter(
+        field_code %in% c("028A", "028B", "028C"),
+        is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+        is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+            "^Adressat",
+            "Erwähnte",
+            "Gefeierte",
+            "Mitglied eines Ausschusses, der akademische Grade vergibt",
+            "Normerlassende Gebietskörperschaft",
+            "Praeses",
+            "Respondent",
+            "Sonstige Person, Familie und Körperschaft",
+            "Verfasser",
+            "Vertragspartner",
+            "Widmende",
+            "Widmungsempfänger",
+            "Drucker",
+            "Zensor",
+            "Beiträger",
+            "GeistigeR Schöpfer",
+            "Mitwirkender",
+            "Herausgeber",
+            "Angeklagte",
+            "Auftraggeber"
+        ), collapse = "|^"))) %>%
+    inner_join(a_id_to_fbs_member_number) %>%
+    inner_join(fbs_metadata %>% transmute(member_number,name=str_c(family_name,", ",first_name, " (",member_number, ")"))) %>%
+    distinct(p_id, field_code,role2,name) %>%
+    group_by(p_id) %>%
+    summarise(substantive_roles=str_flatten(str_c(field_code,":",role2,": ",name),collapse="|")) 
+
+vd17_ids <- fbs_purpose_related_p %>%
+  inner_join(p_id_to_vd17_id_a) %>% 
+  collect() %>%
+  group_by(p_id) %>%
+  summarise(vd17_ids_q=str_flatten(vd17_id,"%27+%27"), vd17_ids=str_flatten(vd17_id, collapse="|")) %>%
+  collect() %>%
+  transmute(p_id, vd17_ids=gs4_formula(str_c('=HYPERLINK("https://kxp.k10plus.de/DB=1.28/CMD?ACT=SRCH&IKT=8079&TRM=%27', vd17_ids_q, '%27","',vd17_ids,'")')))
+
+languages <- p_languages %>% 
+  mutate(languages = str_c(publication_language, intermediary_language, original_language, sep = "<-")) %>%
+  group_by(p_id) %>% 
+  summarize(languages = str_flatten(languages, collapse = "|"))
+
+genres <- p_genre %>%
+  group_by(p_id) %>%
+  summarise(genres=str_flatten(full_genre, collapse="|"))
+
+group_3s <- p_genre %>% 
+  inner_join(genre_categorisation %>% select(group_3, full_genre)) %>%
+  distinct(p_id, group_3) %>%
+  group_by(p_id) %>%
+  summarise(group_3s=str_flatten(group_3, collapse="|"))
+
+years <- p_year %>%
+  inner_join(p_year) %>%
+  group_by(p_id) %>%
+  summarise(years=str_flatten(year,collapse="|"))
+
+overrides <- fbs_manual_status_overrides_a %>% 
+  inner_join(p_id_to_vd17_id_a) %>%
+  distinct(p_id,manual_status_override) %>%
+  group_by(p_id) %>%
+  summarise(overrides=str_flatten(manual_status_override,collapse="|"))
+
+```
+
+
+```{r}
+fbs_purpose_related_p %>%
+  left_join(p_title) %>%
+  left_join(years) %>%
+  left_join(substantive_contributions) %>%
+  left_join(languages) %>%
+  left_join(genres) %>%
+  left_join(group_3s) %>%
+  left_join(overrides) %>%
+  left_join(flag_028C_na_roles) %>%
+  collect() %>%
+  left_join(vd17_ids) %>%
+  relocate(vd17_ids, .after=p_id) %>%
+  sheet_write(ss = "1rXnOSB7P6vhJ5kTPu33upwZM__b0vx602vzBN63FaBw", sheet = "VD17 <-> FBS master printings data")
+```
+
+# comparison graph
+
+```{r}
+register_tables(con, "vd17")
+register_tables(con, "vd17_analysis")
+```
+
+```{r}
+(fbs_gnd_links_a %>% 
+  distinct(GND, record_number) %>% 
+  count(GND) %>% 
+  right_join(fbs_metadata) %>% 
+  replace_na(list(works=0)) %>%
+  mutate(label=str_c(member_number,": ",family_name,", ", first_name)) %>%
+  ggplot(aes(x=earliest_year_of_admission,y=n)) + 
+  geom_jitter(aes(text=label),size=0.5) +
+  geom_smooth(span=0.3) +
+  scale_x_continuous(breaks=seq(1600,1700,by=10)) +
+  scale_y_continuous(breaks=seq(0,2000,by=100)) +
+  ylab("Society-related printings substantively contributed to (N)") +
+  xlab("Year of admission") +
+  theme_hsci_discrete()) %>%
+  ggplotly(width=1024,height=768)
+```
+
+```{r}
+p_id_to_record_number_a %>% 
+  inner_join(p_year) %>% filter(year>1600,year<=1700) %>% group_by(year) %>% summarise(variant_percentage=(n()-n_distinct(p_id))/n()) %>% ggplot(aes(x=year,y=variant_percentage)) + scale_y_continuous(labels=scales::percent) + scale_x_continuous(breaks=seq(1600,1700,by=10)) + geom_point() + geom_smooth() + theme_hsci_discrete() + ylab("Percentage of records that are variants") + xlab("Year")
+```
+

@@ -1,0 +1,714 @@
+---
+title: "Society-aligned output analyses"
+output:
+  word_document:
+    toc: yes
+    keep_md: yes  
+  html_notebook:
+    code_folding: hide
+    toc: yes  
+---
+
+```{r setup}
+knitr::opts_chunk$set(cache = TRUE, cache.path = here::here("cache/"), cache.change_to_flush = 0, message = FALSE, warning = FALSE, dpi = 300, fig.retina = 2, fig.width = 8)
+source(here::here("src/common_basis.R"))
+```
+
+```{r gdrive_version, eval=FALSE}
+library(googledrive)
+rmarkdown::render(here("src/jiemakel/society_related_output_analysis.Rmd"),rmarkdown::word_document(toc=TRUE,keep_md=TRUE))
+drive_put(here("src/jiemakel/society_related_output_analysis.docx"), path = as_id("161toNA4jUgTzMjndSDVp1kpL9yGfHkwG"), name = "society_related_output_analysis", type = "application/vnd.google-apps.document")
+```
+
+
+# Society-aligned output by member through time
+
+In the following, we 
+
+1. first calculate for each member the number of society-related printings they have a substantive relationship to, 
+1. limit only to members for whom we have a time of admission (earliest estimate), and
+1. plot each such member on the graph with x=time of their admission and y=number of society-related printings contributed to.
+1. Further, we calculate a loess-smoothed average for the number of printings contributed to per member through time.
+
+## Overall
+
+```{r}
+periods <- tribble(~period,~start_year,~end_year,
+                   "Köthen", 1617L, 1650L,
+                   "Weimar", 1651L, 1662L,
+                   "Halle", 1667L, 1680L
+)
+
+p <- p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>%
+  inner_join(fbs_metadata) %>%
+  filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+  group_by(member_number) %>%
+  summarise(works=n_distinct(p_id)) %>%
+  right_join(fbs_metadata) %>%
+  collect() %>%
+  complete(nesting(member_number,earliest_year_of_admission),fill=list(works=0)) %>%
+  inner_join(periods,join_by(earliest_year_of_admission>=start_year,earliest_year_of_admission<=end_year)) %>%
+  mutate(label=str_c(member_number,": ",family_name,", ", first_name)) %>%
+  ggplot(aes(x=earliest_year_of_admission,y=works)) +
+  scale_x_continuous(breaks=seq(1600,1700,by=10)) +
+  ylab("Mean contributions per member joining (N)") +
+  xlab("Year of admission") +
+  geom_smooth(span=0.3) +
+  geom_point(data=. %>% group_by(period, earliest_year_of_admission) %>% summarise(works=mean(works))) +
+  scale_y_continuous(breaks=seq(0,20,by=2)) +
+  theme_hsci_discrete() +
+  theme(legend.position = "bottom") +
+  coord_cartesian(ylim=c(0,NA))
+
+save_plots(here("src/jiemakel/figures"),"mean_printings_per_member", p, width=8, height=6)
+```
+```{r}
+periods <- tribble(~start_year,~end_year,~period,
+1617L,1623L, "Köthen",
+1624L,1630L, "Köthen",
+1631L,1637L, "Köthen",
+1638L,1644L, "Köthen",
+1644L,1650L, "Köthen",
+1651L,1656L, "Weimar",
+1657L,1662L, "Weimar",
+1667L,1673L, "Halle",
+1674L,1680L, "Halle"
+) %>% mutate(period_range=factor(str_c(start_year,"-",end_year)))
+
+d <- p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>%
+  inner_join(fbs_metadata) %>%
+  filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+  group_by(member_number) %>%
+  summarise(works=n_distinct(p_id)) %>%
+  right_join(fbs_metadata) %>%
+  collect() %>%
+  complete(nesting(member_number,earliest_year_of_admission),fill=list(works=0)) %>%
+  inner_join(periods,join_by(earliest_year_of_admission>=start_year,earliest_year_of_admission<=end_year)) %>%
+  mutate(period_range=fct_rev(period_range),printings=fct_relevel(case_when(
+    works==0 ~ "0",
+    works==1 ~ "1",
+    works>=2 & works<5 ~ "2-4",
+    works>=5 & works<10 ~ "5-9",
+    works>=10 & works<20 ~ "10-19",
+    works>=20 ~ ">=20"
+  ), "0","1","2-4","5-9","10-19",">=20")) %>%
+  mutate(label=str_c(member_number,": ",family_name,", ", first_name)) %>%
+  count(period_range,printings) %>%
+  group_by(period_range) %>%
+  mutate(prop=n/sum(n)) %>%
+  ungroup()
+```
+
+
+```{r}
+p <- d %>%
+  group_by(period_range) %>%
+  mutate(tn=sum(n)) %>%
+  ungroup() %>%
+  mutate(period_range=fct(str_c(period_range," (N=",tn,")"))) %>%
+  filter(printings!="0") %>%
+  ggplot(aes(x=period_range,y=prop,group=printings,fill=printings)) +
+  ylab("Proportion of members") +
+  xlab("Period of admission") +
+  geom_col(position='stack') +
+  theme_hsci_discrete() +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(labels=scales::percent) +
+  scale_coloropt(limits=c(">=20","10-19","5-9", "2-4", "1")) +
+  labs(fill="Printings associated with member (N)") +
+  coord_flip()
+
+save_plots(here("src/jiemakel/figures"),"member_printing_groups", p, width=8, height=4)
+```
+
+
+```{r}
+d %>%
+  group_by(period_range) %>%
+  mutate(tn=sum(n)) %>%
+  ungroup() %>%
+  mutate(period_range=fct(str_c(period_range," N=(",tn,")"))) %>%
+  ggplot(aes(x=period_range,y=n,group=printings,fill=printings)) +
+  ylab("Proportion of members") +
+  xlab("Period of admission") +
+  geom_col(position='stack') +
+  theme_hsci_discrete() +
+  theme(legend.position = "bottom") +
+  scale_coloropt(limits=c(">=20","10-19","5-9", "2-4", "1", "0")) +
+  labs(fill="Printings associated with member (N)") +
+  coord_flip()
+```
+
+```{r}
+df
+```
+
+
+```{r}
+p1 <- p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>% 
+  group_by(member_number) %>%
+  summarise(works=n_distinct(p_id)) %>%
+  mutate(dataset="base set") %>%
+  union_all(
+    p_to_a %>%
+    inner_join(fbs_purpose_related_p) %>%
+    inner_join(a_id_to_fbs_member_number) %>%
+    filter(
+      field_code %in% c("028A", "028B", "028C"),
+      is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+      is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+        "^Adressat",
+        "Erwähnte",
+        "Gefeierte",
+        "Mitglied eines Ausschusses, der akademische Grade vergibt",
+        "Normerlassende Gebietskörperschaft",
+        "Praeses",
+        "Respondent",
+        "Sonstige Person, Familie und Körperschaft",
+        "Verfasser",
+        "Vertragspartner",
+        "Widmende",
+        "Widmungsempfänger",
+        "Drucker",
+        "Zensor",
+        "Beiträger",
+        "GeistigeR Schöpfer",
+        "Mitwirkender",
+        "Herausgeber",
+        "Angeklagte",
+        "Auftraggeber"
+      ), collapse = "|^"))
+    ) %>%
+    inner_join(fbs_metadata) %>%
+    filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+    group_by(member_number) %>%
+    summarise(works=n_distinct(p_id)) %>%
+    mutate(dataset="028C graf, herzog, fürst removed")
+  ) %>%
+  right_join(fbs_metadata) %>%
+  collect() %>%
+  complete(dataset,nesting(member_number,earliest_year_of_admission),fill=list(works=0)) %>%
+  filter(!is.na(dataset)) %>%
+  mutate(label=str_c(member_number,": ",family_name,", ", first_name)) %>%
+  ggplot(aes(x=earliest_year_of_admission,y=works,color=dataset,fill=dataset)) +
+  scale_x_continuous(breaks=seq(1600,1700,by=10)) +
+  ylab("Society-related printings substantively contributed to (N)") +
+  xlab("Year of admission") +
+  theme_hsci_discrete()
+ 
+p1 + 
+  geom_smooth(span=0.3) +
+  geom_point(data=. %>% group_by(earliest_year_of_admission,dataset) %>% summarise(works=mean(works))) +
+  scale_y_continuous(breaks=seq(0,10,by=1)) +
+  theme(legend.position = "bottom") +
+  coord_cartesian(ylim=c(0,NA))
+
+(p1 + 
+  scale_y_continuous(breaks=seq(0,500,by=50)) +
+  geom_jitter(aes(text=label),size=0.5, height=0) +
+  geom_smooth(span=0.3)
+) %>%
+  ggplotly(width=1024,height=768)
+```
+
+```{r}
+periods <- tribble(~period,~start_year,~end_year,
+                   "Köthen", 1617L, 1650L,
+                   "Weimar", 1651L, 1667L,
+                   "Halle", 1668L, 1680L
+)
+d <- p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>% 
+  group_by(member_number) %>%
+  summarise(works=n_distinct(p_id)) %>%
+  mutate(dataset="base set") %>%
+  union_all(
+    p_to_a %>%
+    inner_join(fbs_purpose_related_p) %>%
+    inner_join(a_id_to_fbs_member_number) %>%
+    filter(
+      field_code %in% c("028A", "028B", "028C"),
+      is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+      is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+        "^Adressat",
+        "Erwähnte",
+        "Gefeierte",
+        "Mitglied eines Ausschusses, der akademische Grade vergibt",
+        "Normerlassende Gebietskörperschaft",
+        "Praeses",
+        "Respondent",
+        "Sonstige Person, Familie und Körperschaft",
+        "Verfasser",
+        "Vertragspartner",
+        "Widmende",
+        "Widmungsempfänger",
+        "Drucker",
+        "Zensor",
+        "Beiträger",
+        "GeistigeR Schöpfer",
+        "Mitwirkender",
+        "Herausgeber",
+        "Angeklagte",
+        "Auftraggeber"
+      ), collapse = "|^"))
+    ) %>%
+    inner_join(fbs_metadata) %>%
+    filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+    group_by(member_number) %>%
+    summarise(works=n_distinct(p_id)) %>%
+    mutate(dataset="028C graf, herzog, fürst removed")
+  ) %>%
+  right_join(fbs_metadata) %>%
+  collect() %>%
+  complete(dataset,nesting(member_number,earliest_year_of_admission),fill=list(works=0)) %>%
+  filter(!is.na(dataset))
+
+d %>% 
+  inner_join(periods, join_by(earliest_year_of_admission>=start_year,earliest_year_of_admission<=end_year)) %>%
+  group_by(period, dataset) %>%
+  summarise(mean_printings=mean(works)) %>%
+  relocate(dataset,period,mean_printings) %>%
+  arrange(dataset,period)
+```
+
+```{r}
+periods <- tribble(~start_year,~end_year,~period,
+1617L,1623L, "Köthen",
+1624L,1630L, "Köthen",
+1631L,1637L, "Köthen",
+1638L,1644L, "Köthen",
+1644L,1650L, "Köthen",
+1651L,1656L, "Weimar",
+1657L,1662L, "Weimar",
+1667L,1673L, "Halle",
+1674L,1680L, "Halle"
+) %>% mutate(period_range=factor(str_c(start_year,"-",end_year)))
+
+p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>% 
+  inner_join(fbs_metadata) %>%
+  filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+  group_by(member_number) %>%
+  summarise(works=n_distinct(p_id)) %>%
+  right_join(fbs_metadata) %>%
+  replace_na(list(works=0)) %>%
+  collect() %>%
+  inner_join(periods, join_by(earliest_year_of_admission>=start_year,earliest_year_of_admission<=end_year)) %>%
+  group_by(period_range) %>%
+  summarise(published_min_one=sum(works>=1)/n(),published_min_two=sum(works>=2)/n(),published_min_five=sum(works>=5)/n(),published_min_ten=sum(works>=10)/n(),published_min_twenty=sum(works>=20)/n(), published_min_fifty=sum(works>=50)/n()) %>%
+  gt() %>%
+  fmt_percent() %>%
+  fmt_passthrough(period_range)
+
+```
+
+
+## By genre
+
+```{r}
+p <- p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>% 
+  left_join(p_genre) %>%
+  left_join(genre_categorisation) %>%
+  filter(is.na(full_genre) | group_1=="Society-related") %>%
+  inner_join(fbs_metadata) %>%
+  filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+  group_by(member_number, group_3) %>%
+  summarise(works=n_distinct(p_id), .groups="drop") %>%
+  right_join(fbs_metadata) %>%
+  mutate(label=str_c(member_number,": ",family_name,", ", first_name)) %>%
+  collect() %>%
+  complete(earliest_year_of_admission, group_3, fill=list(works=0)) %>%
+  ggplot(aes(x=earliest_year_of_admission,y=works)) + 
+  geom_jitter(aes(text=label),size=0.5, height=0) +
+  geom_smooth(span=0.3) +
+  scale_x_continuous(breaks=seq(1600,1700,by=20)) +
+  ylab("Society-related printings substantively contributed to (N)") +
+  xlab("Year of admission") +
+  facet_wrap(~group_3, scales="free_y") +
+  theme_hsci_discrete()
+
+save_plots(here("src/jiemakel/figures"),"mean_printings_by_genre", p, width=8, height=6)
+```
+
+
+```{r}
+(p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>% 
+  left_join(p_genre) %>%
+  left_join(genre_categorisation) %>%
+  filter(is.na(full_genre) | group_1=="Society-related") %>%
+  inner_join(fbs_metadata) %>%
+  filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+  group_by(member_number, group_3) %>%
+  summarise(works=n_distinct(p_id), .groups="drop") %>%
+  right_join(fbs_metadata) %>%
+  mutate(label=str_c(member_number,": ",family_name,", ", first_name)) %>%
+  collect() %>%
+  complete(earliest_year_of_admission, group_3, fill=list(works=0)) %>%
+  ggplot(aes(x=earliest_year_of_admission,y=works)) + 
+  geom_jitter(aes(text=label),size=0.5, height=0) +
+  geom_smooth(span=0.3) +
+  scale_x_continuous(breaks=seq(1600,1700,by=10)) +
+  ylab("Society-related printings substantively contributed to (N)") +
+  xlab("Year of admission") +
+  facet_wrap(~group_3, scales="free_y") +
+  theme_hsci_discrete()) %>%
+  ggplotly(width=1024,height=768)
+```
+
+# Proportion of admitted members with substantive contributions to society-related printings
+
+```{r}
+periods <- tribble(~start_year,~end_year,~period,
+1617L,1623L, "Köthen",
+1624L,1630L, "Köthen",
+1631L,1637L, "Köthen",
+1638L,1644L, "Köthen",
+1645L,1650L, "Köthen",
+1651L,1656L, "Weimar",
+1657L,1662L, "Weimar",
+1667L,1673L, "Halle",
+1674L,1680L, "Halle"
+) %>% mutate(period_range=factor(str_c(start_year,"-",end_year)))
+
+p_to_a %>%
+  inner_join(fbs_purpose_related_p) %>%
+  inner_join(a_id_to_fbs_member_number) %>%
+  filter(
+    field_code %in% c("028A", "028B", "028C"),
+    is.na(role) | !role %in% c("ctb", "dte"), # normed role has to be unknown or not one of these
+    is.na(role2) | !str_detect(role2, !!!str_flatten(c( # role2 should not be one of these
+      "^Adressat",
+      "Erwähnte",
+      "Gefeierte",
+      "Mitglied eines Ausschusses, der akademische Grade vergibt",
+      "Normerlassende Gebietskörperschaft",
+      "Praeses",
+      "Respondent",
+      "Sonstige Person, Familie und Körperschaft",
+      "Verfasser",
+      "Vertragspartner",
+      "Widmende",
+      "Widmungsempfänger",
+      "Drucker",
+      "Zensor",
+      "Beiträger",
+      "GeistigeR Schöpfer",
+      "Mitwirkender",
+      "Herausgeber",
+      "Angeklagte",
+      "Auftraggeber"
+    ), collapse = "|^"))
+  ) %>% 
+  inner_join(fbs_metadata) %>%
+  filter(field_code %in% c("028A", "028B") | is.na(rank_and_position) | !str_detect(rank_and_position,"graf|herzog|fürst")) %>%
+  group_by(member_number) %>%
+  summarise(works=n_distinct(p_id)) %>%
+  right_join(fbs_metadata) %>%
+  replace_na(list(works=0)) %>%
+  mutate(publishing=works>0) %>%
+  collect() %>%
+  inner_join(periods, join_by(earliest_year_of_admission>=start_year,earliest_year_of_admission<=end_year)) %>%
+  group_by(period_range,period) %>%
+  summarise(members_joined=n(),prop_publishing=sum(publishing)/n()) %>%
+  ggplot(aes(x=period_range,y=prop_publishing, fill=period)) + 
+  geom_col() +
+  geom_text(aes(label=members_joined), nudge_y=-0.02, color="white") +
+  scale_x_discrete() +
+  scale_y_continuous(labels=scales::percent) +
+  ylab("Proportion in publishing") +
+  xlab("Period of admission") +
+  theme_hsci_discrete() +
+  theme(legend.position="bottom")
+```
+
+Numbers denote the number of members joining in each period.
+
+# Society-purpose -related publications by genre through time
+
+## Absolute
+
+```{r}
+p_year %>%
+  filter(year>=1600,year<1700) %>%
+  inner_join(fbs_purpose_related_p) %>%
+  left_join(p_genre) %>%
+  left_join(genre_categorisation) %>%
+  filter(is.na(full_genre) | group_1=="Society-related") %>%
+  mutate(decade=floor(year/10)*10) %>%
+  count(group_3,decade) %>%
+  collect() %>%
+  complete(group_3, decade, fill=list(n=0)) %>%
+  ggplot(aes(x=decade,y=n)) +
+  geom_smooth(span=0.3) +
+  geom_point() +
+  coord_cartesian(ylim=c(0,NA)) +
+  scale_x_continuous(breaks=seq(1600,1700,by=20)) +
+  ylab("Printings by members (N)") +
+  xlab("Decade") +
+  facet_wrap(~group_3, scales="free_y") +
+  theme_hsci_discrete()
+```
+
+## Normalised by number of members
+
+```{r}
+members_by_year <- tibble(year=1617:1699) %>% 
+  inner_join(fbs_metadata %>% collect(), join_by(year>=earliest_year_of_admission,year<=latest_year_of_death)) %>%
+  count(year) %>%
+  right_join(tibble(year=1617:1699)) %>%
+  replace_na(list(n=0))
+```
+
+```{r}
+p_year %>%
+  filter(year>=1600,year<1700) %>%
+  inner_join(fbs_purpose_related_p) %>%
+  left_join(p_genre) %>%
+  left_join(genre_categorisation) %>%
+  filter(is.na(full_genre) | group_1=="Society-related") %>%
+  mutate(decade=floor(year/10)*10) %>%
+  count(group_3,decade) %>%
+  collect() %>%
+  complete(group_3, decade, fill=list(n=0)) %>%
+  inner_join(members_by_year %>% 
+               mutate(decade=floor(year/10)*10) %>%
+               group_by(decade) %>%
+               summarise(mean_members=mean(n),.groups="drop")) %>%
+  ggplot(aes(x=decade,y=n/mean_members)) +
+  geom_smooth(span=0.3) +
+  geom_point() +
+  coord_cartesian(ylim=c(0,NA)) +
+  scale_x_continuous(breaks=seq(1600,1700,by=20)) +
+  ylab("Printings per member") +
+  xlab("Decade") +
+  facet_wrap(~group_3, scales="free_y") +
+  theme_hsci_discrete()
+```
+
+## Proportion of publications by genre
+
+```{r}
+t <- p_year %>%
+  filter(year>=1600,year<1700) %>%
+  inner_join(fbs_purpose_related_p) %>%
+  left_join(p_genre) %>%
+  left_join(genre_categorisation) %>%
+  filter(is.na(full_genre) | group_1=="Society-related") %>%
+  mutate(decade=floor(year/10)*10)
+
+t %>%
+  group_by(decade) %>%
+  summarise(total_n=n_distinct(p_id)) %>%
+  inner_join(t %>%
+    count(group_3, decade)
+  ) %>%
+  mutate(prop=n/total_n) %>%
+  collect() %>%
+  complete(group_3, decade, fill=list(prop=0)) %>%
+  ggplot(aes(x=decade,y=prop)) +
+  geom_smooth(span=0.3) +
+  geom_point() +
+  coord_cartesian(ylim=c(0,NA)) +
+  scale_x_continuous(breaks=seq(1600,1700,by=20)) +
+  scale_y_continuous(labels=scales::percent) +
+  ylab("Society printings by genre (%)") +
+  xlab("Decade") +
+  facet_wrap(~group_3, scales="free_y") +
+  theme_hsci_discrete()
+```
+
+
