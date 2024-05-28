@@ -10,11 +10,11 @@ library(gt)
 library(googledrive)
 library(plotly)
 
-save_plots <- function(dir,basename,plot,width=6,height=5,units="in",dpi=300) {
+save_plots <- function(dir,basename,plot,width=6,height=5,units="in",dpi=300, include_format="png") {
   ggsave(glue("{dir}/{basename}.png"),plot,width=width,height=height,dpi=dpi, units=units)
   ggsave(glue("{dir}/{basename}.svg"),plot,width=width,height=height,dpi=dpi, units=units)
   ggsave(glue("{dir}/{basename}.pdf"),plot,width=width,height=height,dpi=dpi, units=units, device = cairo_pdf)
-  knitr::include_graphics(glue("{dir}/{basename}.pdf"), dpi=dpi)
+  knitr::include_graphics(glue("{dir}/{basename}.{include_format}"), dpi=dpi)
 }
 
 if (!exists("con")) con <- get_connection()

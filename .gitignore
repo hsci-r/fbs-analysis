@@ -1,4 +1,5 @@
 db_secret.yaml
+secret.yaml
 cache
 .Rproj.user
 .Rhistory

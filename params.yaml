@@ -1,0 +1,4 @@
+db:
+  db_host: vm2505.kaj.pouta.csc.fi
+  db_name: fbs_analysis
+  db_user: vd17_analysis
